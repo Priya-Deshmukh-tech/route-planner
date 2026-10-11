@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Parallel Route Planner – SF Bay Area</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#0f1420;--panel:#171e2e;--line:#2a3550;--tx:#e6ebf5;--mu:#8e9bb8;--ac:#4cc2ff;--g:#46d39a;--o:#ffb454;--r:#ff6b6b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,Segoe UI,sans-serif;display:flex;height:100vh}
+#side{width:340px;min-width:340px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:14px}
+h1{font-size:17px;margin:0 0 2px}small,.mu{color:var(--mu)}
+.tabs{display:flex;gap:4px;margin:12px 0}.tabs button{flex:1;padding:7px 0;background:#1d2740;border:1px solid var(--line);color:var(--mu);border-radius:6px;cursor:pointer}
+.tabs button.on{background:var(--ac);color:#06121c;font-weight:600}
+label{display:block;margin:10px 0 3px;color:var(--mu);font-size:12px}
+select,input[type=number]{width:100%;padding:7px;background:#0f1626;color:var(--tx);border:1px solid var(--line);border-radius:6px}
+button.go{width:100%;margin-top:12px;padding:9px;background:var(--ac);border:0;border-radius:6px;font-weight:700;color:#06121c;cursor:pointer}
+button.alt{background:#24304d;color:var(--tx);font-weight:500}button:disabled{opacity:.5;cursor:wait}
+.card{background:#10172a;border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:12px}td,th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}
+.chips label{display:inline-flex;align-items:center;gap:4px;margin:3px 8px 3px 0;color:var(--tx);font-size:13px}
+#main{flex:1;position:relative;min-width:0}canvas#map{width:100%;height:100%;display:block;cursor:crosshair}
+#bench{position:absolute;inset:0;overflow:auto;padding:18px;background:var(--bg);display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px}
+.ok{color:var(--g)}.bad{color:var(--r)}.hint{position:absolute;left:12px;bottom:10px;background:#0f1420cc;padding:6px 10px;border-radius:6px;font-size:12px;color:var(--mu)}
+#busy{position:absolute;top:12px;right:12px;background:var(--o);color:#201400;padding:6px 12px;border-radius:6px;display:none;font-weight:600}
+</style></head><body>
+<div id="side">
+ <h1>🚚 Parallel Route Planner</h1><small>SF Bay Area road network · DIMACS USA-road-d.BAY<br><span id="info">loading map…</span></small>
+ <div class="tabs"><button data-t="route" class="on">Route</button><button data-t="fleet">Fleet</button><button data-t="bench">Benchmark</button></div>
+
+ <div id="p-route">
+  <label>Algorithm</label>
+  <select id="algo"><option value="dijkstra">Sequential – Dijkstra</option><option value="delta" selected>OpenMP – Delta-stepping</option></select>
+  <div id="thrBox"><label>OpenMP threads</label><select id="threads"></select>
+   <label>Delta (0 = auto)</label><input type="number" id="delta" value="0" min="0"></div>
+  <label>Timing repetitions (best-of)</label><input type="number" id="reps" value="3" min="1" max="20">
+  <div class="card"><b>Origin</b>: <span id="srcL">click map</span><br><b>Destination</b>: <span id="dstL">click map</span>
+   <div style="display:flex;gap:6px;margin-top:8px"><button class="go alt" id="rand" style="margin:0">🎲 Random</button><button class="go alt" id="swap" style="margin:0">⇄ Swap</button></div></div>
+  <button class="go" id="runRoute">Find route</button>
+  <button class="go alt" id="cmpAll">Compare all (Dijkstra vs OpenMP)</button>
+  <div id="routeOut"></div>
+ </div>
+
+ <div id="p-fleet" style="display:none">
+  <small>Dispatch many vehicles at once (random origin→destination pairs). Parallelised <b>across</b> vehicles.</small>
+  <label>Vehicles</label><input type="number" id="K" value="60" min="1" max="300">
+  <label>Mode</label><select id="fmode"><option value="seq">Sequential</option><option value="omp" selected>OpenMP (parallel for)</option></select>
+  <label>OpenMP threads</label><select id="fthreads"></select>
+  <label>Random seed</label><input type="number" id="seed" value="1">
+  <button class="go" id="runFleet">Dispatch fleet</button>
+  <button class="go alt" id="cmpFleet">Compare sequential vs OpenMP</button>
+  <div id="fleetOut"></div>
+ </div>
+
+ <div id="p-bench" style="display:none">
+  <small>Measures how execution time scales with network size and thread count. Every OpenMP result is checked against sequential Dijkstra.</small>
+  <label>Network sizes (nodes)</label><div class="chips" id="sizes"></div>
+  <label>Thread counts</label><div class="chips" id="bthr"></div>
+  <label>Repetitions (best-of)</label><input type="number" id="breps" value="3" min="1" max="10">
+  <label class="chips"><input type="checkbox" id="bbatch" checked> also benchmark fleet batch (queries:</label><input type="number" id="bq" value="32" min="1" max="500">
+  <button class="go" id="runBench">Run benchmark</button>
+  <button class="go alt" id="verify">Run correctness check</button>
+  <button class="go alt" id="csv" disabled>Download CSV</button>
+  <div id="verOut"></div>
+ </div>
+</div>
+
+<div id="main"><canvas id="map"></canvas><div id="busy">⏳ running…</div>
+ <div class="hint" id="hint">drag = pan · wheel = zoom · click = set origin / destination</div>
+ <div id="bench"></div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let X,Y,N,cpus=1,lonlat,view={x:0,y:0,s:1},src=null,dst=null,overlays=[],clickNext='src',cosf=1;
+const cv=$('map'),cx=cv.getContext('2d');
+const COL=['#46d39a','#4cc2ff','#ffb454','#ff6b6b','#c792ea','#f6e05e','#7ee787','#ff9ecd'];
+
+async function api(path,body){const r=await fetch('/api/'+path,{method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});
+ const j=await r.json();if(j.error)throw new Error(j.error);return j}
+async function busy(on,btn){$('busy').style.display=on?'block':'none';document.querySelectorAll('button.go').forEach(b=>b.disabled=on)}
+
+// ---------- map ----------
+async function init(){
+ const meta=await api('meta');cpus=meta.cpus;
+ const buf=await (await fetch('/api/nodes.bin')).arrayBuffer();const a=new Int32Array(buf);N=a.length/2;
+ lonlat=a;let minx=1e12,maxx=-1e12,miny=1e12,maxy=-1e12;
+ for(let i=0;i<N;i++){const x=a[2*i],y=a[2*i+1];if(x<minx)minx=x;if(x>maxx)maxx=x;if(y<miny)miny=y;if(y>maxy)maxy=y}
+ cosf=Math.cos((miny+maxy)/2e6*Math.PI/180);
+ X=new Float32Array(N);Y=new Float32Array(N);
+ for(let i=0;i<N;i++){X[i]=a[2*i]*cosf/1e6;Y[i]=-a[2*i+1]/1e6}
+ const w=cv.clientWidth,h=cv.clientHeight,bw=(maxx-minx)*cosf/1e6,bh=(maxy-miny)/1e6;
+ view.s=Math.min(w/bw,h/bh)*0.95;view.x=minx*cosf/1e6-(w/view.s-bw)/2;view.y=-maxy/1e6-(h/view.s-bh)/2;
+ $('info').textContent=`${N.toLocaleString()} intersections · ${cpus} CPU thread(s) detected`;
+ const tl=[...new Set([1,2,4,8,16,cpus,cpus*2])].filter(t=>t<=Math.max(cpus*2,4)).sort((p,q)=>p-q);
+ for(const id of['threads','fthreads'])$(id).innerHTML=tl.map(t=>`<option ${t==cpus?'selected':''}>${t}</option>`).join('');
+ $('bthr').innerHTML=tl.map(t=>`<label><input type="checkbox" value="${t}" checked>${t}</label>`).join('');
+ const sz=[5000,10000,20000,50000,100000,200000,N];
+ $('sizes').innerHTML=sz.map((s,i)=>`<label><input type="checkbox" value="${s}" ${i%1==0&&s!=200000?'checked':''}>${s==N?'full ('+(s/1000|0)+'k)':(s/1000)+'k'}</label>`).join('');
+ draw();
+}
+function resize(){cv.width=cv.clientWidth*devicePixelRatio;cv.height=cv.clientHeight*devicePixelRatio;draw()}
+function sx(i){return (X[i]-view.x)*view.s}function sy(i){return (Y[i]-view.y)*view.s}
+function draw(){
+ if(!X)return;const d=devicePixelRatio;cx.setTransform(d,0,0,d,0,0);cx.fillStyle='#0f1420';cx.fillRect(0,0,cv.clientWidth,cv.clientHeight);
+ cx.fillStyle='#34456b';const W=cv.clientWidth,H=cv.clientHeight;
+ for(let i=0;i<N;i++){const px=(X[i]-view.x)*view.s,py=(Y[i]-view.y)*view.s;if(px>=0&&py>=0&&px<W&&py<H)cx.fillRect(px,py,1.2,1.2)}
+ overlays.forEach(o=>{cx.strokeStyle=o.color;cx.lineWidth=o.w||3;cx.lineJoin='round';cx.beginPath();
+  o.path.forEach((n,k)=>k?cx.lineTo(sx(n),sy(n)):cx.moveTo(sx(n),sy(n)));cx.stroke()});
+ pin(src,'#46d39a','A');pin(dst,'#ff6b6b','B');
+}
+function pin(n,c,t){if(n==null)return;const x=sx(n),y=sy(n);cx.fillStyle=c;cx.beginPath();cx.arc(x,y,9,0,7);cx.fill();cx.fillStyle='#000';cx.font='bold 11px sans-serif';cx.textAlign='center';cx.fillText(t,x,y+4)}
+function nearest(px,py){const wx=px/view.s+view.x,wy=py/view.s+view.y;let b=0,bd=1e30;
+ for(let i=0;i<N;i++){const dx=X[i]-wx,dy=Y[i]-wy,dd=dx*dx+dy*dy;if(dd<bd){bd=dd;b=i}}return b}
+let drag=null,moved=0;
+cv.onmousedown=e=>{drag={x:e.offsetX,y:e.offsetY};moved=0};
+cv.onmousemove=e=>{if(!drag)return;const dx=e.offsetX-drag.x,dy=e.offsetY-drag.y;moved+=Math.abs(dx)+Math.abs(dy);
+ view.x-=dx/view.s;view.y-=dy/view.s;drag={x:e.offsetX,y:e.offsetY};draw()};
+cv.onmouseup=e=>{drag=null;if(moved<4){const n=nearest(e.offsetX,e.offsetY);setPoint(n)}};
+cv.onmouseleave=()=>drag=null;
+cv.onwheel=e=>{e.preventDefault();const f=e.deltaY<0?1.25:0.8,wx=e.offsetX/view.s+view.x,wy=e.offsetY/view.s+view.y;
+ view.s*=f;view.x=wx-e.offsetX/view.s;view.y=wy-e.offsetY/view.s;draw()};
+function setPoint(n){if(tab!=='route')return;if(clickNext==='src'){src=n;clickNext='dst'}else{dst=n;clickNext='src'}labels();draw()}
+function labels(){$('srcL').textContent=src==null?'click map':'node '+src;$('dstL').textContent=dst==null?'click map':'node '+dst}
+function fitPath(p){let a=1e30,b=-1e30,c=1e30,d=-1e30;p.forEach(n=>{a=Math.min(a,X[n]);b=Math.max(b,X[n]);c=Math.min(c,Y[n]);d=Math.max(d,Y[n])});
+ const w=cv.clientWidth,h=cv.clientHeight;view.s=Math.min(w/(b-a||1e-3),h/(d-c||1e-3))*.8;view.x=a-(w/view.s-(b-a))/2;view.y=c-(h/view.s-(d-c))/2}
+
+// ---------- tabs ----------
+let tab='route';
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{tab=b.dataset.t;
+ document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x==b));
+ for(const t of['route','fleet','bench'])$('p-'+t).style.display=t==tab?'block':'none';
+ $('bench').style.display=tab=='bench'&&benchHTML?'block':'none';$('hint').style.display=tab=='bench'?'none':'block';
+ overlays=[];draw()});
+$('algo').onchange=()=>$('thrBox').style.display=$('algo').value=='delta'?'block':'none';
+
+// ---------- route ----------
+const fmtD=m=>(m/1000).toFixed(2)+' km'; // DIMACS "d" weights ≈ metres
+$('rand').onclick=()=>{src=Math.random()*N|0;dst=Math.random()*N|0;labels();overlays=[];draw()};
+$('swap').onclick=()=>{[src,dst]=[dst,src];labels();draw()};
+function needPts(){if(src==null||dst==null){alert('Pick an origin and a destination on the map first (or press Random).');return false}return true}
+async function runRoute(algo){return api('route',{algo,threads:+$('threads').value,src,dst,delta:+$('delta').value,reps:+$('reps').value})}
+$('runRoute').onclick=async()=>{if(!needPts())return;busy(1);try{
+ const r=await runRoute($('algo').value);overlays=[{path:r.path,color:'#4cc2ff'}];if(r.path.length>1)fitPath(r.path);draw();
+ $('routeOut').innerHTML=`<div class="card"><table>${row('Algorithm',r.algo=='dijkstra'?'Dijkstra (sequential)':'Delta-stepping (OpenMP)')}${row('Threads',r.threads)}
+ ${row('Distance',r.found?fmtD(r.dist):'unreachable')}${row('Road segments',r.hops)}${row('Time (best of '+$('reps').value+')',r.ms.toFixed(3)+' ms')}${row(r.algo=='dijkstra'?'Nodes settled':'Edge relaxations',r.work.toLocaleString())}</table></div>`}
+ catch(e){alert(e.message)}busy(0)};
+$('cmpAll').onclick=async()=>{if(!needPts())return;busy(1);try{
+ const a=await runRoute('dijkstra'),b=await runRoute('delta');overlays=[{path:a.path,color:'#46d39a',w:6},{path:b.path,color:'#ffb454',w:2.5}];fitPath(a.path);draw();
+ const sp=a.ms/b.ms,eff=sp/b.threads*100;
+ $('routeOut').innerHTML=`<div class="card"><table><tr><th></th><th>Dijkstra</th><th>OpenMP ${b.threads}T</th></tr>
+ <tr><td>Time</td><td>${a.ms.toFixed(3)} ms</td><td>${b.ms.toFixed(3)} ms</td></tr><tr><td>Distance</td><td>${a.dist}</td><td>${b.dist}</td></tr>
+ <tr><td>Speedup</td><td>1.00×</td><td>${sp.toFixed(2)}×</td></tr><tr><td>Efficiency</td><td>–</td><td>${eff.toFixed(0)}%</td></tr></table>
+ <p class="${a.dist==b.dist?'ok':'bad'}">${a.dist==b.dist?'✔ distances match':'✘ MISMATCH'}</p>
+ <small>Single point-to-point queries on a road network have little parallelism (narrow frontiers); see Fleet & Benchmark tabs.</small></div>`}
+ catch(e){alert(e.message)}busy(0)};
+const row=(a,b)=>`<tr><td>${a}</td><td>${b}</td></tr>`;
+
+// ---------- fleet ----------
+async function fleet(mode){return api('fleet',{mode,threads:+$('fthreads').value,k:+$('K').value,seed:+$('seed').value})}
+function showFleet(r){overlays=r.routes.map((x,i)=>({path:x.path,color:COL[i%COL.length],w:2}));src=dst=null;draw();
+ return r}
+$('runFleet').onclick=async()=>{busy(1);try{const r=showFleet(await fleet($('fmode').value));
+ $('fleetOut').innerHTML=`<div class="card"><table>${row('Mode',r.mode)}${row('Threads',r.threads)}${row('Vehicles',r.vehicles)}${row('Total time',r.ms.toFixed(2)+' ms')}${row('Total distance',(r.totalDist/1000).toFixed(1)+' km')}${row('Avg per vehicle',(r.ms/r.vehicles).toFixed(2)+' ms')}</table></div>`}catch(e){alert(e.message)}busy(0)};
+$('cmpFleet').onclick=async()=>{busy(1);try{const a=await fleet('seq'),b=await fleet('omp');showFleet(b);const sp=a.ms/b.ms;
+ $('fleetOut').innerHTML=`<div class="card"><table><tr><th></th><th>Sequential</th><th>OpenMP ${b.threads}T</th></tr><tr><td>Time</td><td>${a.ms.toFixed(1)} ms</td><td>${b.ms.toFixed(1)} ms</td></tr>
+ <tr><td>Speedup</td><td>1.00×</td><td>${sp.toFixed(2)}×</td></tr><tr><td>Efficiency</td><td>–</td><td>${(sp/b.threads*100).toFixed(0)}%</td></tr></table>
+ <p class="${a.totalDist==b.totalDist?'ok':'bad'}">${a.totalDist==b.totalDist?'✔ identical total distance':'✘ MISMATCH'}</p></div>`}catch(e){alert(e.message)}busy(0)};
+
+// ---------- benchmark ----------
+let benchHTML='',benchRows=[];
+const checked=id=>[...document.querySelectorAll('#'+id+' input:checked')].map(i=>+i.value);
+$('verify').onclick=async()=>{busy(1);try{const r=await api('verify',{q:10});$('verOut').innerHTML=`<div class="card ${r.passed?'ok':'bad'}">${r.passed?'✔':'✘'} ${r.queries} random sources × (1,2,4 threads + early-exit): ${r.mismatches} mismatches vs sequential Dijkstra</div>`}catch(e){alert(e.message)}busy(0)};
+$('runBench').onclick=async()=>{const sizes=checked('sizes'),threads=checked('bthr');if(!sizes.length||!threads.length)return alert('select sizes and threads');
+ busy(1);$('busy').textContent='⏳ benchmarking – may take a minute…';
+ try{const r=await api('bench',{sizes,threads,reps:+$('breps').value,batch:$('bbatch').checked?+$('bq').value:0});benchRows=r.rows;renderBench();$('csv').disabled=false}catch(e){alert(e.message)}
+ $('busy').textContent='⏳ running…';busy(0)};
+function renderBench(){
+ const R=benchRows,sizes=[...new Set(R.map(r=>r.nodes))].sort((a,b)=>a-b),thr=[...new Set(R.map(r=>r.threads))].sort((a,b)=>a-b);
+ const f=(n,a,t)=>R.find(r=>r.nodes==n&&r.algo==a&&r.threads==t);
+ const maxT=thr[thr.length-1],big=sizes[sizes.length-1],hasB=R.some(r=>r.algo=='batch-omp');
+ let tr='';sizes.forEach(n=>{const d=f(n,'dijkstra',1);tr+=`<tr><td>${n}</td><td>dijkstra</td><td>1</td><td>${d.ms.toFixed(2)}</td><td>1.00</td><td>100%</td><td class="ok">✔</td></tr>`;
+  R.filter(r=>r.nodes==n&&r.algo=='delta-omp').forEach(r=>{const s=d.ms/r.ms;tr+=`<tr><td>${n}</td><td>delta-omp</td><td>${r.threads}</td><td>${r.ms.toFixed(2)}</td><td>${s.toFixed(2)}</td><td>${(s/r.threads*100).toFixed(0)}%</td><td class="${r.verified?'ok':'bad'}">${r.verified?'✔':'✘'}</td></tr>`});
+  R.filter(r=>r.nodes==n&&r.algo=='batch-omp').forEach(r=>{const b=f(n,'batch-omp',1),s=b.ms/r.ms;tr+=`<tr><td>${n}</td><td>fleet-batch</td><td>${r.threads}</td><td>${r.ms.toFixed(2)}</td><td>${s.toFixed(2)}</td><td>${(s/r.threads*100).toFixed(0)}%</td><td class="${r.verified?'ok':'bad'}">${r.verified?'✔':'✘'}</td></tr>`})});
+ $('bench').innerHTML=`<h2 style="margin-top:0">Benchmark results</h2><p class="mu">Speedup is relative to sequential Dijkstra (delta-omp) or to the 1-thread run (fleet-batch). Efficiency = speedup / threads.</p>
+ <div class="grid"><div class="card"><canvas id="c1" width="520" height="300"></canvas></div><div class="card"><canvas id="c2" width="520" height="300"></canvas></div>
+ <div class="card"><canvas id="c3" width="520" height="300"></canvas></div><div class="card"><canvas id="c4" width="520" height="300"></canvas></div></div>
+ <div class="card"><table><tr><th>Nodes</th><th>Algorithm</th><th>Threads</th><th>Time (ms)</th><th>Speedup</th><th>Efficiency</th><th>Correct</th></tr>${tr}</table></div>`;
+ benchHTML=1;$('bench').style.display='block';
+ const s1=[{name:'Dijkstra (seq)',pts:sizes.map(n=>[n,f(n,'dijkstra',1).ms])}];thr.forEach(t=>s1.push({name:`OpenMP ${t}T`,pts:sizes.map(n=>[n,f(n,'delta-omp',t)?.ms]).filter(p=>p[1]!=null)}));
+ chart('c1','Execution time vs network size (single-source)',s1,'nodes','ms',true);
+ chart('c2','Speedup vs threads (largest network, delta-omp)',[{name:'measured',pts:thr.map(t=>[t,f(big,'dijkstra',1).ms/f(big,'delta-omp',t).ms])},{name:'ideal',pts:thr.map(t=>[t,t])}],'threads','speedup');
+ chart('c3','Parallel efficiency (delta-omp, %)',sizes.map(n=>({name:n+' nodes',pts:thr.map(t=>[t,f(n,'dijkstra',1).ms/f(n,'delta-omp',t).ms/t*100])})),'threads','%');
+ if(hasB)chart('c4','Fleet batch: speedup vs threads (largest network)',[{name:'measured',pts:thr.map(t=>[t,f(big,'batch-omp',1).ms/f(big,'batch-omp',t).ms])},{name:'ideal',pts:thr.map(t=>[t,t])}],'threads','speedup');
+ else chart('c4','Time vs threads (largest network)',[{name:'delta-omp',pts:thr.map(t=>[t,f(big,'delta-omp',t).ms])}],'threads','ms');
+}
+function chart(id,title,series,xl,yl,logx){
+ const c=$(id),g=c.getContext('2d'),W=c.width,H=c.height,m={l:55,r:15,t:30,b:38};g.clearRect(0,0,W,H);
+ const all=series.flatMap(s=>s.pts),fx=logx?Math.log10:v=>v;
+ let x0=Math.min(...all.map(p=>fx(p[0]))),x1=Math.max(...all.map(p=>fx(p[0]))),y1=Math.max(...all.map(p=>p[1]))*1.08,y0=0;if(x0==x1)x1=x0+1;
+ const px=v=>m.l+(fx(v)-x0)/(x1-x0)*(W-m.l-m.r),py=v=>H-m.b-(v-y0)/(y1-y0)*(H-m.t-m.b);
+ g.fillStyle='#e6ebf5';g.font='bold 13px sans-serif';g.fillText(title,m.l,18);g.font='11px sans-serif';g.strokeStyle='#2a3550';g.fillStyle='#8e9bb8';
+ for(let i=0;i<=4;i++){const v=y0+(y1-y0)*i/4,y=py(v);g.beginPath();g.moveTo(m.l,y);g.lineTo(W-m.r,y);g.stroke();g.textAlign='right';g.fillText(v>=100?v.toFixed(0):v.toFixed(1),m.l-5,y+4)}
+ g.textAlign='center';[...new Set(all.map(p=>p[0]))].forEach(v=>g.fillText(v>=1000?(v/1000|0)+'k':v,px(v),H-m.b+14));g.fillText(xl,(W+m.l)/2,H-5);
+ g.save();g.translate(12,H/2);g.rotate(-Math.PI/2);g.fillText(yl,0,0);g.restore();
+ series.forEach((s,i)=>{const col=s.name=='ideal'?'#667':COL[i%COL.length];g.strokeStyle=col;g.fillStyle=col;g.lineWidth=2;g.setLineDash(s.name=='ideal'?[5,4]:[]);g.beginPath();
+  s.pts.forEach((p,k)=>k?g.lineTo(px(p[0]),py(p[1])):g.moveTo(px(p[0]),py(p[1])));g.stroke();g.setLineDash([]);s.pts.forEach(p=>{g.beginPath();g.arc(px(p[0]),py(p[1]),3,0,7);g.fill()})});
+ g.textAlign='left';series.forEach((s,i)=>{g.fillStyle=s.name=='ideal'?'#889':COL[i%COL.length];g.fillRect(W-r(130),m.t+4+i*13,8,8);g.fillStyle='#e6ebf5';g.fillText(s.name,W-r(118),m.t+12+i*13)});function r(v){return v}}
+$('csv').onclick=()=>{const t='nodes,edges,algorithm,threads,time_ms,verified\n'+benchRows.map(r=>[r.nodes,r.edges,r.algo,r.threads,r.ms,r.verified].join(',')).join('\n');
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));a.download='benchmark.csv';a.click()};
+addEventListener('resize',resize);resize();init().catch(e=>$('info').textContent='error: '+e.message);
+</script></body></html>
